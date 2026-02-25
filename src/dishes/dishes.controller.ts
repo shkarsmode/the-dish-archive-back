@@ -11,19 +11,17 @@ import {
     UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { existsSync, mkdirSync } from 'fs';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
+import { memoryStorage } from 'multer';
 import { AdminGuard } from '../auth/admin.guard';
+import { CloudinaryService } from './cloudinary.service';
 import { DishesService } from './dishes.service';
-
-const uploadsDir = process.env['VERCEL']
-    ? '/tmp/uploads'
-    : join(process.cwd(), 'uploads');
 
 @Controller('dishes')
 export class DishesController {
-    constructor(private readonly dishesService: DishesService) {}
+    constructor(
+        private readonly dishesService: DishesService,
+        private readonly cloudinaryService: CloudinaryService,
+    ) {}
 
     @Get()
     getAll() {
@@ -58,19 +56,7 @@ export class DishesController {
     @UseGuards(AdminGuard)
     @UseInterceptors(
         FileInterceptor('image', {
-            storage: diskStorage({
-                destination: (_req, _file, cb) => {
-                    if (!existsSync(uploadsDir)) {
-                        mkdirSync(uploadsDir, { recursive: true });
-                    }
-                    cb(null, uploadsDir);
-                },
-                filename: (_req, file, cb) => {
-                    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-                    const ext = extname(file.originalname);
-                    cb(null, `dish-${uniqueSuffix}${ext}`);
-                },
-            }),
+            storage: memoryStorage(),
             limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
             fileFilter: (_req, file, cb) => {
                 if (!file.mimetype.match(/^image\/(jpeg|png|webp|avif)$/)) {
@@ -80,10 +66,11 @@ export class DishesController {
             },
         }),
     )
-    uploadImage(@UploadedFile() file: Express.Multer.File) {
+    async uploadImage(@UploadedFile() file: Express.Multer.File) {
+        const result = await this.cloudinaryService.uploadImage(file);
         return {
-            url: `/api/uploads/${file.filename}`,
-            filename: file.filename,
+            url: result.url,
+            publicId: result.publicId,
         };
     }
 }
