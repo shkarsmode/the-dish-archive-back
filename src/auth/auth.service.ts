@@ -3,8 +3,8 @@ import { JwtService } from '@nestjs/jwt';
 
 @Injectable()
 export class AuthService {
-    private readonly adminNickname = process.env['ADMIN_NICKNAME'] ?? 'nastya';
-    private readonly adminPassword = process.env['ADMIN_PASSWORD'] ?? 'bulkina2026';
+    private readonly adminNickname = process.env['ADMIN_NICKNAME'];
+    private readonly adminPassword = process.env['ADMIN_PASSWORD'];
 
     constructor(private readonly jwtService: JwtService) {}
 
