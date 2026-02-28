@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChangelogEntry, CookingStep, Dish, DishImage, Ingredient } from './entities';
 
-const DATABASE_URL = process.env['DATABASE_URL'];
+const DATABASE_URL = process.env['STORAGE_DATABASE_URL'];
 console.log('Using database URL:', DATABASE_URL);
 
 @Module({
