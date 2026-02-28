@@ -24,31 +24,31 @@ export class DishesController {
     ) {}
 
     @Get()
-    getAll() {
+    async getAll() {
         return this.dishesService.getAllDishes();
     }
 
     @Get(':id')
-    getOne(@Param('id') id: string) {
+    async getOne(@Param('id') id: string) {
         return this.dishesService.getDishById(id);
     }
 
     @Put(':id')
     @UseGuards(AdminGuard)
-    update(@Param('id') id: string, @Body() body: any) {
+    async update(@Param('id') id: string, @Body() body: any) {
         return this.dishesService.updateDish(id, body);
     }
 
     @Post()
     @UseGuards(AdminGuard)
-    create(@Body() body: any) {
+    async create(@Body() body: any) {
         return this.dishesService.createDish(body);
     }
 
     @Delete(':id')
     @UseGuards(AdminGuard)
-    remove(@Param('id') id: string) {
-        this.dishesService.deleteDish(id);
+    async remove(@Param('id') id: string) {
+        await this.dishesService.deleteDish(id);
         return { success: true };
     }
 
