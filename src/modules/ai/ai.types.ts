@@ -41,8 +41,27 @@ export interface GeminiRecipePayload {
     tags?: string[] | null;
     ingredients?: GeminiIngredient[] | null;
     steps?: GeminiStep[] | null;
+    taste?: GeminiTaste | null;
     notes?: string | null;
     warnings?: string[] | null;
+}
+
+export interface GeminiTaste {
+    sweet?: number | null;
+    salty?: number | null;
+    sour?: number | null;
+    bitter?: number | null;
+    spicy?: number | null;
+    umami?: number | null;
+}
+
+export interface TasteProfile {
+    sweet: number;
+    salty: number;
+    sour: number;
+    bitter: number;
+    spicy: number;
+    umami: number;
 }
 
 // The safe, validated draft returned to the frontend. Shaped to merge straight into
@@ -58,6 +77,7 @@ export interface RecipeDraft {
     tags: string[];
     ingredients: { name: string; amount: string; unit: string; optional: boolean }[];
     steps: { order: number; description: string; duration?: number }[];
+    taste: TasteProfile;
     notes: string;
     warnings: string[];
     meta: {
@@ -111,8 +131,23 @@ export const AI_RECIPE_SCHEMA = {
                 required: ['description'],
             },
         },
+        taste: {
+            type: Type.OBJECT,
+            description:
+                'Estimated taste profile of the finished dish. ALWAYS fill all six as integers 0-5 ' +
+                '(0 = none, 5 = very strong), inferring reasonable values from the ingredients and dish type.',
+            properties: {
+                sweet: { type: Type.INTEGER, description: 'Sweetness 0-5' },
+                salty: { type: Type.INTEGER, description: 'Saltiness 0-5' },
+                sour: { type: Type.INTEGER, description: 'Sourness 0-5' },
+                bitter: { type: Type.INTEGER, description: 'Bitterness 0-5' },
+                spicy: { type: Type.INTEGER, description: 'Spiciness 0-5' },
+                umami: { type: Type.INTEGER, description: 'Umami/savouriness 0-5' },
+            },
+            required: ['sweet', 'salty', 'sour', 'bitter', 'spicy', 'umami'],
+        },
         notes: { type: Type.STRING, nullable: true, description: 'Extra tips / notes if any' },
         warnings: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Short notes about anything ambiguous' },
     },
-    required: ['ingredients', 'steps'],
+    required: ['ingredients', 'steps', 'taste'],
 } as const;

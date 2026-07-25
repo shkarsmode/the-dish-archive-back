@@ -34,6 +34,11 @@ export const AI_MAX_STRING = 400;
 export const AI_MAX_DESCRIPTION = 2000;
 export const AI_MAX_STEP_TEXT = 2000;
 
+// Taste profile: six dimensions the model estimates, each clamped to 0..AI_TASTE_MAX
+// (matches the editor's 0-5 sliders).
+export const AI_TASTE_MAX = 5;
+export const TASTE_KEYS = ['sweet', 'salty', 'sour', 'bitter', 'spicy', 'umami'] as const;
+
 export const DIFFICULTIES = ['easy', 'medium', 'hard'] as const;
 export const RECIPE_CATEGORIES = [
     'quick',
