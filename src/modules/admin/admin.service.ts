@@ -12,7 +12,7 @@ import { CreateFamilyDto } from './dto/create-family.dto';
 export class AdminService {
     constructor(
         private readonly prisma: PrismaService,
-        private readonly activity: ActivityService,
+        private readonly activityLog: ActivityService,
     ) {}
 
     // create_family RPC: super-admin creates a family and optionally seats an owner.
@@ -44,7 +44,7 @@ export class AdminService {
             }
             return fam;
         });
-        await this.activity.log({
+        await this.activityLog.log({
             actorUserId: user.id,
             familyId: family.id,
             entityType: 'family',
