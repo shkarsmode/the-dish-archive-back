@@ -15,10 +15,11 @@ generator client {
 
 datasource db {
     provider  = "postgresql"
-    url       = env("DATABASE_URL")
+    // The Vercel/Neon integration on this project injects these (STORAGE_ prefix).
+    url       = env("STORAGE_DATABASE_URL")
     // Direct (unpooled) URL for Prisma CLI migrations — Neon's pooled pgbouncer
     // endpoint can't run the DDL/advisory-locks migrations need. Runtime uses `url`.
-    directUrl = env("DATABASE_URL_UNPOOLED")
+    directUrl = env("STORAGE_DATABASE_URL_UNPOOLED")
 }
 
 // ── Enumerated domains (were CHECK constraints in Postgres) ───────────────────
