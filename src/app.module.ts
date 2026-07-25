@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { HealthController } from './health.controller';
 import { AccessRequestsModule } from './modules/access-requests/access-requests.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { AiModule } from './modules/ai/ai.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ChangelogModule } from './modules/changelog/changelog.module';
 import { DishesModule } from './modules/dishes/dishes.module';
@@ -31,6 +32,7 @@ import { SharedModule } from './shared/shared.module';
         ChangelogModule,
         UploadsModule,
         PublicModule,
+        AiModule,
     ],
     controllers: [HealthController],
 })
