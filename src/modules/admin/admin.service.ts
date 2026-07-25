@@ -1,14 +1,59 @@
 import { Injectable } from '@nestjs/common';
 import { ActivityLog, Family, User } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { ActivityService } from '../../shared/activity.service';
+import { RequestUser } from '../../shared/current-user.decorator';
 import { toFamily } from '../families/family.serializer';
+import { CreateFamilyDto } from './dto/create-family.dto';
 
-// Super-admin dashboard reads: platform-wide stats, families, users and the
-// audit trail. Every route is gated by SuperAdminGuard at the controller, so
-// these methods don't re-check authz — they just serialize.
+// Super-admin dashboard reads + create_family. Every route is gated by
+// SuperAdminGuard at the controller, so these methods don't re-check authz.
 @Injectable()
 export class AdminService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly activity: ActivityService,
+    ) {}
+
+    // create_family RPC: super-admin creates a family and optionally seats an owner.
+    async createFamily(user: RequestUser, dto: CreateFamilyDto) {
+        const now = new Date();
+        const family = await this.prisma.$transaction(async (tx) => {
+            const fam = await tx.family.create({
+                data: {
+                    slug: dto.slug,
+                    name: dto.name,
+                    description: dto.description ?? null,
+                    themeColor: dto.themeColor ?? null,
+                    createdByUserId: user.id,
+                },
+            });
+            if (dto.ownerUserId) {
+                await tx.familyMember.upsert({
+                    where: { familyId_userId: { familyId: fam.id, userId: dto.ownerUserId } },
+                    update: { role: 'owner', status: 'approved', approvedByUserId: user.id, approvedAt: now },
+                    create: {
+                        familyId: fam.id,
+                        userId: dto.ownerUserId,
+                        role: 'owner',
+                        status: 'approved',
+                        approvedByUserId: user.id,
+                        approvedAt: now,
+                    },
+                });
+            }
+            return fam;
+        });
+        await this.activity.log({
+            actorUserId: user.id,
+            familyId: family.id,
+            entityType: 'family',
+            entityId: family.id,
+            action: 'created',
+            metadata: { slug: dto.slug },
+        });
+        return toFamily(family);
+    }
 
     async stats() {
         const [families, dishes, users, pendingRequests] = await Promise.all([

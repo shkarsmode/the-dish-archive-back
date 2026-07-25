@@ -1,7 +1,9 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { CurrentUser, RequestUser } from '../../shared/current-user.decorator';
 import { JwtAuthGuard } from '../../shared/jwt-auth.guard';
 import { SuperAdminGuard } from '../../shared/super-admin.guard';
 import { AdminService } from './admin.service';
+import { CreateFamilyDto } from './dto/create-family.dto';
 
 // Super-admin-only dashboard. Note: /admin/access-requests lives in the
 // access-requests module, not here.
@@ -18,6 +20,11 @@ export class AdminController {
     @Get('families')
     families() {
         return this.admin.families();
+    }
+
+    @Post('families')
+    createFamily(@CurrentUser() user: RequestUser, @Body() body: CreateFamilyDto) {
+        return this.admin.createFamily(user, body);
     }
 
     @Get('users')
