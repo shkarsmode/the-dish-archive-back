@@ -1,0 +1,373 @@
+// The Dish Archive — data model.
+//
+// Ported from the Supabase Postgres schema (families / roles / dishes+children /
+// ratings / likes / access-requests / activity-log / changelog) to a plain
+// Postgres owned by this NestJS backend. Row-Level Security no longer exists here:
+// every authorization rule the RLS policies encoded is reimplemented in code
+// (see src/shared/authz.service.ts + the per-module guards).
+//
+// Auth model: a single `User` row per person (merges Supabase auth.users + profiles).
+// Identity comes from Google OAuth; `globalRole` drives super-admin.
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider  = "postgresql"
+    url       = env("DATABASE_URL")
+    // Direct (unpooled) URL for Prisma CLI migrations — Neon's pooled pgbouncer
+    // endpoint can't run the DDL/advisory-locks migrations need. Runtime uses `url`.
+    directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ── Enumerated domains (were CHECK constraints in Postgres) ───────────────────
+
+enum FamilyRole {
+    owner
+    admin
+    editor
+    viewer
+}
+
+enum MemberStatus {
+    pending
+    approved
+    rejected
+    removed
+}
+
+enum FamilyStatus {
+    active
+    archived
+}
+
+enum DishVisibility {
+    family
+    public
+}
+
+enum DishStatus {
+    draft
+    published
+    archived
+}
+
+enum DishDifficulty {
+    easy
+    medium
+    hard
+}
+
+enum AccessRequestStatus {
+    pending
+    approved
+    rejected
+}
+
+enum ChangelogAction {
+    added
+    updated
+    removed
+    fixed
+    improved
+}
+
+// ── Identity ──────────────────────────────────────────────────────────────────
+
+// One row per person. `globalRole` is 'user' | 'super_admin' (matches the SPA's
+// UserProfile.globalRole). Super-admin is also bootstrapped by email on first
+// login (see AuthService), mirroring the old handle_new_user() trigger.
+model User {
+    id          String   @id @default(cuid())
+    email       String   @unique
+    googleId    String?  @unique
+    displayName String?
+    avatarUrl   String?
+    globalRole  String   @default("user")
+    lastLoginAt DateTime?
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    oauthAccounts   OAuthAccount[]
+    memberships     FamilyMember[]  @relation("MemberUser")
+    ratings         RecipeRating[]
+    likes           DishLike[]
+    accessRequests  AccessRequest[] @relation("RequestedBy")
+    activityLogs    ActivityLog[]   @relation("ActorUser")
+
+    @@index([email])
+}
+
+model OAuthAccount {
+    id                String    @id @default(cuid())
+    userId            String
+    provider          String
+    providerAccountId String
+    accessToken       String?
+    refreshToken      String?
+    expiresAt         DateTime?
+    createdAt         DateTime  @default(now())
+    updatedAt         DateTime  @updatedAt
+    user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([provider, providerAccountId])
+    @@index([userId])
+}
+
+// ── Tenancy ───────────────────────────────────────────────────────────────────
+
+model Family {
+    id              String       @id @default(cuid())
+    slug            String       @unique
+    name            String
+    description     String?
+    coverImageUrl   String?
+    avatarImageUrl  String?
+    themeColor      String?
+    isPublicVisible Boolean      @default(false)
+    status          FamilyStatus @default(active)
+    createdByUserId String?
+    createdAt       DateTime     @default(now())
+    updatedAt       DateTime     @updatedAt
+
+    members        FamilyMember[]
+    dishes         Dish[]
+    ratings        RecipeRating[]
+    accessRequests AccessRequest[]
+    activityLogs   ActivityLog[]
+    changelog      ChangelogEntry[]
+}
+
+model FamilyMember {
+    id               String       @id @default(cuid())
+    familyId         String
+    userId           String
+    role             FamilyRole   @default(viewer)
+    status           MemberStatus @default(pending)
+    approvedByUserId String?
+    approvedAt       DateTime?
+    createdAt        DateTime     @default(now())
+    updatedAt        DateTime     @updatedAt
+
+    family Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+    user   User   @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([familyId, userId])
+    @@index([userId])
+    @@index([familyId])
+}
+
+// ── Recipes ───────────────────────────────────────────────────────────────────
+
+// `id` is text (e.g. "dish-034") to preserve legacy ids + slug routing. Slug is
+// unique WITHIN a family, not globally.
+model Dish {
+    id              String         @id
+    familyId        String
+    createdByUserId String?
+    updatedByUserId String?
+    title           String
+    slug            String
+    description     String         @default("")
+    rating          Float          @default(0)
+    ratingAverage   Float          @default(0)
+    ratingCount     Int            @default(0)
+    likeCount       Int            @default(0)
+    priceAmount     Int            @default(0)
+    priceCurrency   String         @default("UAH")
+    prepTime        Int            @default(0)
+    cookTime        Int            @default(0)
+    totalTime       Int            @default(0)
+    calories        Int            @default(0)
+    servings        Int            @default(0)
+    difficulty      DishDifficulty @default(easy)
+    tags            String[]       @default([])
+    categories      String[]       @default([])
+    tasteSweet      Int            @default(0)
+    tasteSalty      Int            @default(0)
+    tasteSour       Int            @default(0)
+    tasteBitter     Int            @default(0)
+    tasteSpicy      Int            @default(0)
+    tasteUmami      Int            @default(0)
+    notes           String         @default("")
+    sourceUrl       String         @default("")
+    visibility      DishVisibility @default(family)
+    status          DishStatus     @default(draft)
+    viewCount       Int            @default(0)
+    cookedCount     Int            @default(0)
+    createdAt       DateTime       @default(now())
+    updatedAt       DateTime       @updatedAt
+
+    family      Family         @relation(fields: [familyId], references: [id], onDelete: Cascade)
+    images      DishImage[]
+    ingredients Ingredient[]
+    steps       CookingStep[]
+    ratings     RecipeRating[]
+    likes       DishLike[]
+
+    @@unique([familyId, slug])
+    @@index([familyId])
+    @@index([status])
+    @@index([visibility])
+    @@index([slug])
+}
+
+model DishImage {
+    id        BigInt  @id @default(autoincrement())
+    dishId    String
+    url       String
+    alt       String?
+    isPrimary Boolean @default(false)
+    sortOrder Int     @default(0)
+    dish      Dish    @relation(fields: [dishId], references: [id], onDelete: Cascade)
+
+    @@index([dishId])
+}
+
+model Ingredient {
+    id        BigInt  @id @default(autoincrement())
+    dishId    String
+    name      String
+    amount    String  @default("")
+    unit      String  @default("")
+    optional  Boolean @default(false)
+    sortOrder Int     @default(0)
+    dish      Dish    @relation(fields: [dishId], references: [id], onDelete: Cascade)
+
+    @@index([dishId])
+}
+
+model CookingStep {
+    id          BigInt  @id @default(autoincrement())
+    dishId      String
+    stepOrder   Int     @default(0)
+    description String  @default("")
+    duration    Int?
+    imageUrl    String?
+    dish        Dish    @relation(fields: [dishId], references: [id], onDelete: Cascade)
+
+    @@index([dishId])
+}
+
+// ── Social ────────────────────────────────────────────────────────────────────
+
+model RecipeRating {
+    id        String   @id @default(cuid())
+    dishId    String
+    userId    String
+    familyId  String
+    rating    Int
+    comment   String?
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    dish   Dish   @relation(fields: [dishId], references: [id], onDelete: Cascade)
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+    family Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+    @@unique([dishId, userId])
+    @@index([dishId])
+    @@index([familyId])
+}
+
+model DishLike {
+    id        String   @id @default(cuid())
+    dishId    String
+    userId    String
+    createdAt DateTime @default(now())
+
+    dish Dish @relation(fields: [dishId], references: [id], onDelete: Cascade)
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([dishId, userId])
+    @@index([dishId])
+    @@index([userId])
+}
+
+// ── Access & audit ────────────────────────────────────────────────────────────
+
+model AccessRequest {
+    id                 String              @id @default(cuid())
+    email              String
+    familyId           String?
+    requestedRole      FamilyRole?
+    status             AccessRequestStatus @default(pending)
+    requestedByUserId  String?
+    reviewedByUserId   String?
+    reviewNote         String?
+    createdAt          DateTime            @default(now())
+    updatedAt          DateTime            @updatedAt
+
+    family          Family? @relation(fields: [familyId], references: [id], onDelete: SetNull)
+    requestedByUser User?   @relation("RequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+
+    @@index([status])
+    @@index([familyId])
+}
+
+model ActivityLog {
+    id          String   @id @default(cuid())
+    actorUserId String?
+    familyId    String?
+    entityType  String
+    entityId    String?
+    action      String
+    metadata    Json     @default("{}")
+    createdAt   DateTime @default(now())
+
+    actor  User?   @relation("ActorUser", fields: [actorUserId], references: [id], onDelete: SetNull)
+    family Family? @relation(fields: [familyId], references: [id], onDelete: SetNull)
+
+    @@index([familyId])
+    @@index([actorUserId])
+    @@index([createdAt])
+}
+
+model ChangelogEntry {
+    id          Int             @id @default(autoincrement())
+    familyId    String?
+    version     String          @default("")
+    title       String          @default("")
+    description String?
+    action      ChangelogAction @default(improved)
+    dishId      String? // loose reference (no FK) — history survives dish deletion
+    dishTitle   String?
+    changes     String[]        @default([])
+    date        DateTime        @default(now())
+
+    family Family? @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+    @@index([date])
+    @@index([familyId])
+}
+
+// ── AI usage audit (recipe generation) ────────────────────────────────────────
+
+// One row per Gemini call from the admin-only AI recipe feature. `userId` is a
+// loose reference (no FK) so the log survives user deletion. Never stores
+// prompts/responses — only safe usage metadata + normalized error codes.
+model AiUsageLog {
+    id                    String   @id @default(cuid())
+    userId                String?
+    operation             String // "parse_recipe"
+    model                 String
+    status                String // "success" | "error"
+    errorCode             String?
+    errorMessage          String?
+    inputTokens           Int?
+    outputTokens          Int?
+    totalTokens           Int?
+    cachedTokens          Int?
+    thoughtsTokens        Int?
+    durationMs            Int?
+    inputLength           Int?
+    recognizedIngredients Int?
+    recognizedSteps       Int?
+    warningsCount         Int?
+    createdAt             DateTime @default(now())
+
+    @@index([createdAt])
+    @@index([userId])
+    @@index([status])
+}

@@ -1,23 +1,19 @@
 import { Module } from '@nestjs/common';
-import { JwtModule } from '@nestjs/jwt';
-import { AuthModule } from './auth/auth.module';
-import { ChangelogModule } from './changelog/changelog.module';
-import { DatabaseModule } from './database/database.module';
-import { DishesModule } from './dishes/dishes.module';
-
-const JWT_SECRET = process.env['JWT_SECRET'] ?? 'dish-archive-super-secret-key-change-me';
+import { ConfigModule } from '@nestjs/config';
+import { HealthController } from './health.controller';
+import { AuthModule } from './modules/auth/auth.module';
+import { PrismaModule } from './prisma/prisma.module';
+import { SharedModule } from './shared/shared.module';
 
 @Module({
     imports: [
-        JwtModule.register({
-            global: true,
-            secret: JWT_SECRET,
-            signOptions: { expiresIn: '7d' },
-        }),
-        DatabaseModule,
+        ConfigModule.forRoot({ isGlobal: true }),
+        PrismaModule,
+        SharedModule,
         AuthModule,
-        DishesModule,
-        ChangelogModule,
+        // Domain modules (dishes, families, members, ratings, likes, access-requests,
+        // admin, changelog, uploads, public, ai) are added in P2/P3/P6.
     ],
+    controllers: [HealthController],
 })
 export class AppModule {}

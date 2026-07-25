@@ -5,14 +5,15 @@
       "src": "api/index.ts",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": ["data/**"]
+        "includeFiles": [
+          "prisma/schema.prisma",
+          "node_modules/.prisma/client/**",
+          "node_modules/@prisma/client/**"
+        ]
       }
     }
   ],
   "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "api/index.ts"
-    }
+    { "src": "/(.*)", "dest": "api/index.ts" }
   ]
 }
