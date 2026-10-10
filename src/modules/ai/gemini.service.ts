@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { ContentListUnion, GoogleGenAI, MediaResolution, ThinkingLevel } from '@google/genai';
 import { Injectable, Logger } from '@nestjs/common';
 import { AI_ERROR, AI_MAX_OUTPUT_TOKENS, AI_TEMPERATURE, aiModel, aiTimeoutMs } from './ai.constants';
 import { AiError } from './ai.types';
@@ -9,6 +9,8 @@ export interface GeminiUsage {
     totalTokens: number | null;
     cachedTokens: number | null;
     thoughtsTokens: number | null;
+    /** Prompt tokens billed at the audio rate (video soundtracks, voice notes). */
+    audioInputTokens?: number | null;
 }
 
 export interface GeminiStructuredResult {
@@ -17,7 +19,21 @@ export interface GeminiStructuredResult {
     model: string;
 }
 
-// Thin wrapper around the official @google/genai SDK — the ONLY place Gemini is
+export interface GeminiStructuredOptions {
+    systemInstruction: string;
+    /** A plain prompt, or multimodal contents (text + inline images + file URIs). */
+    prompt?: string;
+    contents?: ContentListUnion;
+    schema: unknown;
+    model?: string;
+    timeoutMs?: number;
+    maxOutputTokens?: number;
+    temperature?: number;
+    mediaResolution?: MediaResolution;
+    thinkingLevel?: ThinkingLevel;
+}
+
+// Thin wrapper around the official @google/genai SDK - the ONLY place Gemini is
 // called. Enforces a hard timeout (the SDK's own timeout is unreliable, so we combine
 // an AbortController with a Promise.race) and normalizes SDK errors into AiError codes.
 @Injectable()
@@ -44,30 +60,28 @@ export class GeminiService {
         return this.client;
     }
 
-    async generateStructured(options: {
-        systemInstruction: string;
-        prompt: string;
-        schema: unknown;
-    }): Promise<GeminiStructuredResult> {
+    async generateStructured(options: GeminiStructuredOptions): Promise<GeminiStructuredResult> {
         const client = this.getClient();
-        const model = this.getModel();
+        const model = options.model || this.getModel();
         const controller = new AbortController();
         let timedOut = false;
         const timer = setTimeout(() => {
             timedOut = true;
             controller.abort();
-        }, aiTimeoutMs());
+        }, options.timeoutMs ?? aiTimeoutMs());
 
         try {
             const generation = client.models.generateContent({
                 model,
-                contents: options.prompt,
+                contents: options.contents ?? options.prompt ?? '',
                 config: {
                     systemInstruction: options.systemInstruction,
                     responseMimeType: 'application/json',
                     responseSchema: options.schema as never,
-                    temperature: AI_TEMPERATURE,
-                    maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
+                    temperature: options.temperature ?? AI_TEMPERATURE,
+                    maxOutputTokens: options.maxOutputTokens ?? AI_MAX_OUTPUT_TOKENS,
+                    ...(options.mediaResolution ? { mediaResolution: options.mediaResolution } : {}),
+                    ...(options.thinkingLevel ? { thinkingConfig: { thinkingLevel: options.thinkingLevel } } : {}),
                     abortSignal: controller.signal,
                 },
             });
@@ -80,6 +94,9 @@ export class GeminiService {
 
             const response = await Promise.race([generation, timeout]);
             const usage = response.usageMetadata;
+            const audioInputTokens = (usage?.promptTokensDetails || [])
+                .filter((detail) => String(detail.modality || '').toUpperCase() === 'AUDIO')
+                .reduce((sum, detail) => sum + (Number(detail.tokenCount) || 0), 0);
             return {
                 text: response.text ?? '',
                 model,
@@ -89,6 +106,7 @@ export class GeminiService {
                     totalTokens: numberOrNull(usage?.totalTokenCount),
                     cachedTokens: numberOrNull(usage?.cachedContentTokenCount),
                     thoughtsTokens: numberOrNull(usage?.thoughtsTokenCount),
+                    audioInputTokens,
                 },
             };
         } catch (error) {
@@ -101,17 +119,20 @@ export class GeminiService {
         }
     }
 
-    // Map SDK/HTTP errors to safe codes — never surface raw provider messages.
+    // Map SDK/HTTP errors to safe codes - never surface raw provider messages.
     private normalizeError(error: unknown): AiError {
         if (error instanceof AiError) return error;
         const status = Number((error as { status?: number })?.status || 0);
         const message = String((error as { message?: string })?.message || '');
-        this.logger.warn(`Gemini call failed: ${status || ''} ${message.slice(0, 200)}`);
+        this.logger.warn(`Gemini call failed: ${status || ''} ${message.slice(0, 300)}`);
         if (status === 429 || /rate limit|resource exhausted|quota/i.test(message)) {
             return new AiError(AI_ERROR.RATE_LIMIT, 'Gemini rate limit reached', 429);
         }
         if (status === 401 || status === 403 || /api key|permission/i.test(message)) {
             return new AiError(AI_ERROR.NOT_CONFIGURED, 'Gemini authentication failed', 503);
+        }
+        if (status === 400 && /video|youtube|file|uri|media/i.test(message)) {
+            return new AiError(AI_ERROR.MEDIA_UNSUPPORTED, 'Gemini could not read the media', 422);
         }
         return new AiError(AI_ERROR.GEMINI_ERROR, 'Gemini request failed', 502);
     }

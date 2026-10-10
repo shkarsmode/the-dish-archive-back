@@ -351,7 +351,7 @@ model ChangelogEntry {
 model AiUsageLog {
     id                    String   @id @default(cuid())
     userId                String?
-    operation             String // "parse_recipe"
+    operation             String // "parse_recipe" | "import_recipe"
     model                 String
     status                String // "success" | "error"
     errorCode             String?
@@ -366,6 +366,8 @@ model AiUsageLog {
     recognizedIngredients Int?
     recognizedSteps       Int?
     warningsCount         Int?
+    costUsd               Float?
+    source                String?
     createdAt             DateTime @default(now())
 
     @@index([createdAt])

@@ -1,31 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
-import { isSuperAdmin } from '../../shared/admin';
 import { RequestUser } from '../../shared/current-user.decorator';
-import {
-    AI_DEFAULT_DIFFICULTY,
-    AI_ERROR,
-    AI_MAX_CALORIES,
-    AI_MAX_CATEGORIES,
-    AI_MAX_DESCRIPTION,
-    AI_MAX_INGREDIENTS,
-    AI_MAX_MINUTES,
-    AI_MAX_SERVINGS,
-    AI_MAX_STEP_TEXT,
-    AI_MAX_STEPS,
-    AI_MAX_STRING,
-    AI_MAX_TAGS,
-    AI_MIN_INPUT_LENGTH,
-    AI_OPERATION,
-    AI_TASTE_MAX,
-    aiDailyLimit,
-    aiMaxInputLength,
-    DIFFICULTIES,
-    RECIPE_CATEGORIES,
-} from './ai.constants';
+import { AI_ERROR, AI_MIN_INPUT_LENGTH, AI_OPERATION, aiMaxInputLength, estimateCostUsd } from './ai.constants';
+import { AiAccessService } from './ai-access.service';
 import { AiUsageService } from './ai-usage.service';
 import { GeminiService, GeminiUsage } from './gemini.service';
 import { AI_RECIPE_SCHEMA, AiError, GeminiRecipePayload, RecipeDraft } from './ai.types';
+import { buildDraft, normalizeInput, safeParse } from './recipe-draft';
 
 const SYSTEM_INSTRUCTION = [
     "You convert a free-form spoken or written recipe description into a structured recipe for 'The Dish Archive'.",
@@ -54,27 +34,12 @@ export class AiRecipeService {
     private readonly inFlight = new Set<string>();
 
     constructor(
-        private readonly prisma: PrismaService,
         private readonly gemini: GeminiService,
         private readonly usage: AiUsageService,
+        private readonly access: AiAccessService,
     ) {}
 
-    // The feature is for group admins (owner/admin of a family) and the super-admin.
-    private async assertEligible(user: RequestUser): Promise<boolean> {
-        if (isSuperAdmin(user)) return true;
-        const adminMembership = await this.prisma.familyMember.findFirst({
-            where: { userId: user.id, status: 'approved', role: { in: ['owner', 'admin'] } },
-            select: { id: true },
-        });
-        if (!adminMembership) {
-            throw new AiError(AI_ERROR.FORBIDDEN, 'AI-генерація доступна лише адміністраторам родини.', 403);
-        }
-        return false;
-    }
-
     async parse(user: RequestUser, rawText: string): Promise<RecipeDraft> {
-        const isSuper = await this.assertEligible(user);
-
         const text = normalizeInput(rawText);
         if (text.length < AI_MIN_INPUT_LENGTH) {
             throw new AiError(AI_ERROR.INPUT_TOO_SHORT, 'Опис рецепта закороткий.', 400);
@@ -89,26 +54,15 @@ export class AiRecipeService {
             throw new AiError(AI_ERROR.RATE_LIMIT, 'Зачекай завершення попереднього запиту.', 429);
         }
 
-        // Daily quota: group admins are capped; the super-admin is unlimited.
-        const dailyLimit = isSuper ? null : aiDailyLimit();
-        let dailyUsed = 0;
-        if (dailyLimit != null) {
-            dailyUsed = await this.usage.countTodaySuccess(user.id);
-            if (dailyUsed >= dailyLimit) {
-                throw new AiError(
-                    AI_ERROR.DAILY_LIMIT,
-                    `Ліміт ${dailyLimit} AI-рецептів на день вичерпано. Спробуй завтра.`,
-                    429,
-                );
-            }
-        }
+        // Daily quota: family writers are capped; the super-admin is unlimited.
+        const { dailyLimit, dailyUsed } = await this.access.assertAllowed(user);
 
         this.inFlight.add(user.id);
         const startedAt = Date.now();
         const model = this.gemini.getModel();
         try {
             const { payload, usage } = await this.callGemini(text);
-            const draft = this.buildDraft(payload);
+            const draft = buildDraft(payload);
             draft.meta = {
                 model,
                 dailyLimit,
@@ -125,6 +79,7 @@ export class AiRecipeService {
                 totalTokens: usage.totalTokens,
                 cachedTokens: usage.cachedTokens,
                 thoughtsTokens: usage.thoughtsTokens,
+                costUsd: estimateCostUsd(model, usage),
                 durationMs: Date.now() - startedAt,
                 inputLength: text.length,
                 recognizedIngredients: draft.ingredients.length,
@@ -181,106 +136,5 @@ export class AiRecipeService {
             if (payload) return { payload, usage };
         }
         throw new AiError(AI_ERROR.INVALID_RESPONSE, 'AI повернув некоректну відповідь. Спробуй ще раз.', 502);
-    }
-
-    // Coerce, clamp and validate the model output into a safe draft.
-    private buildDraft(payload: GeminiRecipePayload): RecipeDraft {
-        const prep = clampInt(payload.prepTime, 0, AI_MAX_MINUTES) ?? 0;
-        const cook = clampInt(payload.cookTime, 0, AI_MAX_MINUTES) ?? 0;
-        let total = clampInt(payload.totalTime, 0, AI_MAX_MINUTES) ?? 0;
-        if (!total && (prep || cook)) total = prep + cook;
-
-        const difficulty = DIFFICULTIES.includes(payload.difficulty as never)
-            ? (payload.difficulty as string)
-            : AI_DEFAULT_DIFFICULTY;
-
-        const categories = [
-            ...new Set((payload.categories || []).filter((c) => RECIPE_CATEGORIES.includes(c as never))),
-        ].slice(0, AI_MAX_CATEGORIES);
-
-        const tags = [
-            ...new Set((payload.tags || []).map((t) => cleanString(t, 60)).filter(Boolean)),
-        ].slice(0, AI_MAX_TAGS);
-
-        const ingredients = (Array.isArray(payload.ingredients) ? payload.ingredients : [])
-            .slice(0, AI_MAX_INGREDIENTS)
-            .map((ing) => ({
-                name: cleanString(ing?.name, AI_MAX_STRING),
-                amount: cleanString(ing?.amount, 60),
-                unit: cleanString(ing?.unit, 40),
-                optional: !!ing?.optional,
-            }))
-            .filter((ing) => ing.name.length > 0);
-
-        const steps = (Array.isArray(payload.steps) ? payload.steps : [])
-            .slice(0, AI_MAX_STEPS)
-            .map((step, index) => {
-                const duration = clampInt(step?.duration, 0, AI_MAX_MINUTES);
-                return {
-                    order: index + 1,
-                    description: cleanString(step?.description, AI_MAX_STEP_TEXT),
-                    ...(duration ? { duration } : {}),
-                };
-            })
-            .filter((step) => step.description.length > 0)
-            .map((step, index) => ({ ...step, order: index + 1 }));
-
-        const warnings = (Array.isArray(payload.warnings) ? payload.warnings : [])
-            .map((w) => cleanString(w, 200))
-            .filter(Boolean)
-            .slice(0, 20);
-
-        const t = payload.taste || {};
-        const taste = {
-            sweet: clampInt(t.sweet, 0, AI_TASTE_MAX) ?? 0,
-            salty: clampInt(t.salty, 0, AI_TASTE_MAX) ?? 0,
-            sour: clampInt(t.sour, 0, AI_TASTE_MAX) ?? 0,
-            bitter: clampInt(t.bitter, 0, AI_TASTE_MAX) ?? 0,
-            spicy: clampInt(t.spicy, 0, AI_TASTE_MAX) ?? 0,
-            umami: clampInt(t.umami, 0, AI_TASTE_MAX) ?? 0,
-        };
-
-        return {
-            title: cleanString(payload.title, AI_MAX_STRING),
-            description: cleanString(payload.description, AI_MAX_DESCRIPTION),
-            servings: clampInt(payload.servings, 1, AI_MAX_SERVINGS) ?? 0,
-            cookingTime: { preparation: prep, cooking: cook, total },
-            calories: clampInt(payload.calories, 0, AI_MAX_CALORIES) ?? 0,
-            difficulty,
-            categories,
-            tags,
-            ingredients,
-            steps,
-            taste,
-            notes: cleanString(payload.notes, AI_MAX_DESCRIPTION),
-            warnings,
-            meta: { model: '', dailyLimit: null, dailyUsed: null, dailyRemaining: null },
-        };
-    }
-}
-
-function normalizeInput(text: unknown): string {
-    return String(text ?? '').replace(/\s+/g, ' ').trim();
-}
-
-function cleanString(value: unknown, max: number): string {
-    return String(value ?? '').trim().slice(0, max);
-}
-
-function clampInt(value: unknown, min: number, max: number): number | null {
-    const n = Math.round(Number(value));
-    if (!Number.isFinite(n)) return null;
-    return Math.min(max, Math.max(min, n));
-}
-
-// Tolerant JSON parse: strips ```json fences, never throws.
-function safeParse(text: string): GeminiRecipePayload | null {
-    if (!text) return null;
-    const trimmed = text.trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
-    try {
-        const parsed = JSON.parse(trimmed);
-        return parsed && typeof parsed === 'object' ? (parsed as GeminiRecipePayload) : null;
-    } catch {
-        return null;
     }
 }

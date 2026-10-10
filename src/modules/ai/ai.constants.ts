@@ -70,6 +70,11 @@ export const AI_ERROR = {
     INVALID_RESPONSE: 'INVALID_RESPONSE',
     EMPTY_RESULT: 'EMPTY_RESULT',
     GEMINI_ERROR: 'GEMINI_ERROR',
+    MEDIA_UNSUPPORTED: 'MEDIA_UNSUPPORTED',
+    BAD_URL: 'BAD_URL',
+    SOURCE_UNAVAILABLE: 'SOURCE_UNAVAILABLE',
+    SOURCE_EMPTY: 'SOURCE_EMPTY',
+    BAD_IMAGE: 'BAD_IMAGE',
 } as const;
 
 // Official Gemini free-tier limits per model (static reference for the admin tab).
@@ -83,6 +88,54 @@ export const GEMINI_LIMITS_SOURCE_URL = 'https://ai.google.dev/gemini-api/docs/r
 export const GEMINI_QUOTA_DASHBOARD_URL = 'https://aistudio.google.com/rate-limit';
 
 export const AI_OPERATION = 'parse_recipe';
+export const AI_IMPORT_OPERATION = 'import_recipe';
+/** Every operation that spends the per-user daily AI quota. */
+export const AI_QUOTA_OPERATIONS = [AI_OPERATION, AI_IMPORT_OPERATION];
+
+// ── Recipe import (link / photo / text) ──────────────────────────────────────
+
+/** Generous timeouts: a link import reads a whole page, a video import watches it. */
+export const AI_IMPORT_TIMEOUT_MS = 55000;
+export const AI_IMPORT_VIDEO_TIMEOUT_MS = 110000;
+export const AI_IMPORT_MAX_OUTPUT_TOKENS = 8192;
+export const AI_IMPORT_MAX_IMAGES = 4;
+/** Decoded bytes per attached photo (the client downsizes before sending). */
+export const AI_IMPORT_MAX_IMAGE_BYTES = 1_600_000;
+/** Source text handed to the model (caption + structured data + page text). */
+export const AI_IMPORT_MAX_SOURCE_CHARS = 16000;
+/** A post's own video file is sent inline only up to this size (Gemini's inline cap is ~20 MB). */
+export const AI_IMPORT_MAX_VIDEO_BYTES = 14_000_000;
+/** The model watches at most this much of a YouTube video (longer ones: description only when known). */
+export const AI_IMPORT_MAX_VIDEO_SECONDS = 20 * 60;
+
+export function aiImportModel(): string {
+    return (process.env.GEMINI_IMPORT_MODEL || '').trim() || aiModel();
+}
+
+// USD per 1M tokens (paid tier, ai.google.dev/gemini-api/docs/pricing, checked
+// 2026-10-10). Thinking tokens bill at the output rate. Unknown models fall back to
+// the default model's price so the estimate never silently reads as free.
+export const GEMINI_PRICES_USD_PER_M: Record<string, { input: number; audioInput: number; output: number }> = {
+    'gemini-3.1-flash-lite': { input: 0.25, audioInput: 0.5, output: 1.5 },
+    'gemini-3.5-flash-lite': { input: 0.3, audioInput: 0.3, output: 2.5 },
+    'gemini-3.6-flash': { input: 0.75, audioInput: 0.75, output: 3.75 },
+    'gemini-3.8-flash': { input: 0.75, audioInput: 0.75, output: 3.75 },
+    'gemini-3-flash-preview': { input: 0.5, audioInput: 1.0, output: 3.0 },
+    'gemini-2.5-flash-lite': { input: 0.1, audioInput: 0.3, output: 0.4 },
+    'gemini-2.5-flash': { input: 0.3, audioInput: 1.0, output: 2.5 },
+};
+
+export function estimateCostUsd(
+    model: string,
+    usage: { inputTokens?: number | null; outputTokens?: number | null; thoughtsTokens?: number | null; audioInputTokens?: number | null },
+): number {
+    const price = GEMINI_PRICES_USD_PER_M[model] || GEMINI_PRICES_USD_PER_M[AI_DEFAULT_MODEL];
+    const audio = Math.max(0, usage.audioInputTokens || 0);
+    const input = Math.max(0, (usage.inputTokens || 0) - audio);
+    const output = Math.max(0, (usage.outputTokens || 0) + (usage.thoughtsTokens || 0));
+    const cost = (input * price.input + audio * price.audioInput + output * price.output) / 1_000_000;
+    return Math.round(cost * 1_000_000) / 1_000_000;
+}
 
 export function aiModel(): string {
     return (process.env.GEMINI_MODEL || '').trim() || AI_DEFAULT_MODEL;

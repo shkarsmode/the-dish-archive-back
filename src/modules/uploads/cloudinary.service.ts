@@ -16,10 +16,19 @@ export class CloudinaryService {
         });
     }
 
+    isConfigured(): boolean {
+        return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+    }
+
     async uploadImage(
         file: Express.Multer.File,
         folder = 'dish-archive',
     ): Promise<{ url: string; publicId: string }> {
+        return this.uploadBuffer(file.buffer, folder);
+    }
+
+    /** Upload raw image bytes (used for imported covers and AI-picked dish photos). */
+    async uploadBuffer(buffer: Buffer, folder = 'dish-archive'): Promise<{ url: string; publicId: string }> {
         return new Promise((resolve, reject) => {
             const uploadStream = cloudinary.uploader.upload_stream(
                 {
@@ -36,7 +45,7 @@ export class CloudinaryService {
                 },
             );
             const stream = new Readable();
-            stream.push(file.buffer);
+            stream.push(buffer);
             stream.push(null);
             stream.pipe(uploadStream);
         });

@@ -43,3 +43,27 @@ export class AiRateLimitGuard implements CanActivate {
         );
     }
 }
+
+// The import preview is free (no model call) but fetches third-party pages, so it
+// gets its own looser window: no cooldown (it runs alongside the import), 30 a minute.
+@Injectable()
+export class AiPreviewRateLimitGuard implements CanActivate {
+    private readonly hits = new Map<string, number[]>();
+
+    canActivate(context: ExecutionContext): boolean {
+        const request = context.switchToHttp().getRequest();
+        const key = request.user?.id || request.ip || 'anon';
+        const now = Date.now();
+        const stamps = (this.hits.get(key) || []).filter((stamp) => now - stamp < 60_000);
+        if (stamps.length >= 30) {
+            throw new HttpException(
+                { code: 'AI_RATE_LIMIT', message: 'Забагато запитів. Спробуйте за хвилину.', retryAfterMs: 60_000 - (now - stamps[0]) },
+                HttpStatus.TOO_MANY_REQUESTS,
+            );
+        }
+        stamps.push(now);
+        this.hits.set(key, stamps);
+        if (this.hits.size > 1000) this.hits.clear();
+        return true;
+    }
+}

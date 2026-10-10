@@ -1,9 +1,9 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { resolvePage } from '../../shared/pagination';
 import {
     aiModel,
-    AI_OPERATION,
+    AI_QUOTA_OPERATIONS,
     GEMINI_FREE_TIER_LIMITS,
     GEMINI_LIMITS_SOURCE_URL,
     GEMINI_QUOTA_DASHBOARD_URL,
@@ -27,6 +27,10 @@ export interface AiUsageEntry {
     recognizedIngredients?: number | null;
     recognizedSteps?: number | null;
     warningsCount?: number | null;
+    /** Estimated USD cost from the token counts (see estimateCostUsd). */
+    costUsd?: number | null;
+    /** Where an import came from: instagram, youtube, website, photo, text... */
+    source?: string | null;
 }
 
 type Period = 'today' | '7d' | '30d' | 'all';
@@ -41,7 +45,7 @@ export interface StatisticsQuery {
 }
 
 @Injectable()
-export class AiUsageService implements OnModuleInit {
+export class AiUsageService {
     private readonly logger = new Logger(AiUsageService.name);
     private tableReady = false;
 
@@ -50,12 +54,10 @@ export class AiUsageService implements OnModuleInit {
         private readonly gemini: GeminiService,
     ) {}
 
-    async onModuleInit() {
-        await this.ensureTable();
-    }
-
     // Idempotent table creation for serverless Postgres where the pooled connection
-    // can't run migration DDL. Best-effort — the log path degrades gracefully.
+    // can't run migration DDL. Best-effort - the log path degrades gracefully. Runs
+    // lazily on the first AI call, not on boot, so cold starts of every other
+    // endpoint do not wait for these DDL round trips.
     async ensureTable() {
         if (this.tableReady) return;
         try {
@@ -83,6 +85,18 @@ export class AiUsageService implements OnModuleInit {
             await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AiUsageLog_createdAt_idx" ON "AiUsageLog" ("createdAt")`);
             await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AiUsageLog_userId_idx" ON "AiUsageLog" ("userId")`);
             await this.prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AiUsageLog_status_idx" ON "AiUsageLog" ("status")`);
+            // Added with the link/photo importer: estimated cost and the import source.
+            // ALTER takes an exclusive lock even when the column exists: look first.
+            const columns = await this.prisma.$queryRawUnsafe<{ column_name: string }[]>(
+                `SELECT column_name FROM information_schema.columns WHERE table_name = 'AiUsageLog' AND column_name IN ('costUsd', 'source')`,
+            );
+            const present = new Set(columns.map((column) => column.column_name));
+            if (!present.has('costUsd')) {
+                await this.prisma.$executeRawUnsafe(`ALTER TABLE "AiUsageLog" ADD COLUMN IF NOT EXISTS "costUsd" DOUBLE PRECISION`);
+            }
+            if (!present.has('source')) {
+                await this.prisma.$executeRawUnsafe(`ALTER TABLE "AiUsageLog" ADD COLUMN IF NOT EXISTS "source" TEXT`);
+            }
             this.tableReady = true;
         } catch (error) {
             this.logger.warn(`ensureTable failed: ${(error as Error).message}`);
@@ -111,6 +125,8 @@ export class AiUsageService implements OnModuleInit {
                     recognizedIngredients: entry.recognizedIngredients ?? null,
                     recognizedSteps: entry.recognizedSteps ?? null,
                     warningsCount: entry.warningsCount ?? null,
+                    costUsd: entry.costUsd ?? null,
+                    source: entry.source ?? null,
                 },
             });
         } catch (error) {
@@ -118,12 +134,17 @@ export class AiUsageService implements OnModuleInit {
         }
     }
 
-    // Successful recipe generations by this user today — drives the daily quota.
+    // Successful AI recipe calls (parse + import) by this user today - drives the daily quota.
     async countTodaySuccess(userId: string): Promise<number> {
         try {
             await this.ensureTable();
             return await this.prisma.aiUsageLog.count({
-                where: { userId, operation: AI_OPERATION, status: 'success', createdAt: { gte: startOfToday() } },
+                where: {
+                    userId,
+                    operation: { in: AI_QUOTA_OPERATIONS },
+                    status: 'success',
+                    createdAt: { gte: startOfToday() },
+                },
             });
         } catch (error) {
             this.logger.warn(`countTodaySuccess failed: ${(error as Error).message}`);
@@ -152,6 +173,7 @@ export class AiUsageService implements OnModuleInit {
                 cachedTokens: true,
                 thoughtsTokens: true,
                 durationMs: true,
+                costUsd: true,
             },
         });
 
@@ -163,7 +185,9 @@ export class AiUsageService implements OnModuleInit {
         let latencySum = 0;
         let latencyCount = 0;
         let maxLatencyMs = 0;
+        let costUsd = 0;
         for (const r of rows) {
+            costUsd += r.costUsd || 0;
             inputTokens += r.inputTokens || 0;
             outputTokens += r.outputTokens || 0;
             totalTokens += r.totalTokens || 0;
@@ -191,6 +215,8 @@ export class AiUsageService implements OnModuleInit {
                 totalTokens,
                 avgLatencyMs: latencyCount ? Math.round(latencySum / latencyCount) : 0,
                 maxLatencyMs,
+                costUsd: Math.round(costUsd * 10000) / 10000,
+                avgCostUsd: rows.length ? Math.round((costUsd / rows.length) * 1_000_000) / 1_000_000 : 0,
             },
             models: [...modelMap.entries()]
                 .map(([model, v]) => ({ model, requests: v.requests, totalTokens: v.totalTokens }))
@@ -256,6 +282,8 @@ export class AiUsageService implements OnModuleInit {
                 recognizedIngredients: r.recognizedIngredients,
                 recognizedSteps: r.recognizedSteps,
                 warningsCount: r.warningsCount,
+                costUsd: r.costUsd,
+                source: r.source,
             })),
             page,
             pageSize,

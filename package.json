@@ -29,6 +29,7 @@
     "cloudinary": "^2.9.0",
     "cookie-parser": "^1.4.7",
     "express": "^4.21.2",
+    "node-html-parser": "^7.1.0",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "passport-jwt": "^4.0.1",

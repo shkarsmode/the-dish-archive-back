@@ -151,3 +151,142 @@ export const AI_RECIPE_SCHEMA = {
     },
     required: ['ingredients', 'steps', 'taste'],
 } as const;
+
+// ── Recipe import (link / photo / text) ──────────────────────────────────────
+
+export const IMPORT_SOURCE_KINDS = ['recipe_page', 'social_post', 'video', 'recipe_photo', 'dish_photo', 'text'] as const;
+export const IMPORT_CONFIDENCE = ['high', 'medium', 'low'] as const;
+export const IMPORT_ISSUE_FIELDS = [
+    'title',
+    'ingredients',
+    'steps',
+    'time',
+    'servings',
+    'temperature',
+    'equipment',
+    'other',
+] as const;
+export const IMPORT_ISSUE_SEVERITY = ['missing', 'unclear', 'assumed', 'conflict'] as const;
+
+export type ImportIssueField = (typeof IMPORT_ISSUE_FIELDS)[number];
+export type ImportIssueSeverity = (typeof IMPORT_ISSUE_SEVERITY)[number];
+
+/** Something the cook should check: a gap, an ambiguity, a guess or a contradiction. */
+export interface ImportIssue {
+    field: ImportIssueField;
+    severity: ImportIssueSeverity;
+    message: string;
+    /** 0-based ingredient or step the issue points at, when it points at one. */
+    itemIndex?: number;
+}
+
+export type ImportPlatform =
+    | 'instagram'
+    | 'tiktok'
+    | 'youtube'
+    | 'facebook'
+    | 'telegram'
+    | 'pinterest'
+    | 'threads'
+    | 'x'
+    | 'website'
+    | 'photo'
+    | 'text';
+
+export interface ImportSourceInfo {
+    platform: ImportPlatform;
+    url: string;
+    title: string;
+    author: string;
+    /** Re-hosted (Cloudinary) cover candidate, or '' when the source had none. */
+    imageUrl: string;
+    /** How the content was read: caption, structured data, page text, video, photo. */
+    via: string[];
+}
+
+export interface RecipeImportResult extends RecipeDraft {
+    isRecipe: boolean;
+    notRecipeReason: string;
+    confidence: (typeof IMPORT_CONFIDENCE)[number];
+    sourceKind: (typeof IMPORT_SOURCE_KINDS)[number];
+    sourceLanguage: string;
+    issues: ImportIssue[];
+    images: { url: string; alt: string; isPrimary: boolean }[];
+    sourceUrl: string;
+    source: ImportSourceInfo;
+    cost: { model: string; inputTokens: number; outputTokens: number; usd: number; durationMs: number };
+}
+
+export interface GeminiImportPayload extends GeminiRecipePayload {
+    isRecipe?: boolean | null;
+    notRecipeReason?: string | null;
+    sourceKind?: string | null;
+    sourceLanguage?: string | null;
+    confidence?: string | null;
+    issues?: { field?: string | null; severity?: string | null; message?: string | null; itemIndex?: number | null }[] | null;
+    dishPhotoIndexes?: number[] | null;
+}
+
+const RECIPE_FIELDS = AI_RECIPE_SCHEMA.properties;
+
+// Import schema = the recipe schema + a verdict (is this a recipe at all), a
+// confidence level and the list of issues the cook must check before saving.
+export const AI_IMPORT_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        isRecipe: {
+            type: Type.BOOLEAN,
+            description: 'true only if the material contains (or, for a dish photo, lets you reconstruct) a cookable recipe',
+        },
+        notRecipeReason: {
+            type: Type.STRING,
+            nullable: true,
+            description: 'When isRecipe is false: one short Ukrainian sentence saying what the material is instead',
+        },
+        sourceKind: { type: Type.STRING, enum: [...IMPORT_SOURCE_KINDS] },
+        sourceLanguage: { type: Type.STRING, nullable: true, description: 'ISO 639-1 code of the source language' },
+        confidence: {
+            type: Type.STRING,
+            enum: [...IMPORT_CONFIDENCE],
+            description: 'high = complete recipe with amounts and steps; medium = small gaps; low = big gaps or reconstructed',
+        },
+        title: RECIPE_FIELDS.title,
+        description: RECIPE_FIELDS.description,
+        servings: RECIPE_FIELDS.servings,
+        prepTime: RECIPE_FIELDS.prepTime,
+        cookTime: RECIPE_FIELDS.cookTime,
+        totalTime: RECIPE_FIELDS.totalTime,
+        calories: RECIPE_FIELDS.calories,
+        difficulty: RECIPE_FIELDS.difficulty,
+        categories: RECIPE_FIELDS.categories,
+        tags: RECIPE_FIELDS.tags,
+        ingredients: RECIPE_FIELDS.ingredients,
+        steps: RECIPE_FIELDS.steps,
+        taste: RECIPE_FIELDS.taste,
+        notes: RECIPE_FIELDS.notes,
+        issues: {
+            type: Type.ARRAY,
+            description: 'Everything the cook must check: missing amounts, times, temperatures, unclear units, guesses, contradictions',
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    field: { type: Type.STRING, enum: [...IMPORT_ISSUE_FIELDS] },
+                    severity: { type: Type.STRING, enum: [...IMPORT_ISSUE_SEVERITY] },
+                    message: { type: Type.STRING, description: 'Short, specific, actionable, in Ukrainian' },
+                    itemIndex: {
+                        type: Type.INTEGER,
+                        nullable: true,
+                        description: '0-based index into ingredients or steps when the issue is about one item',
+                    },
+                },
+                required: ['field', 'severity', 'message'],
+            },
+        },
+        dishPhotoIndexes: {
+            type: Type.ARRAY,
+            items: { type: Type.INTEGER },
+            description: '0-based indexes of the attached photos that show the finished dish (good as the recipe cover)',
+        },
+    },
+    required: ['isRecipe', 'confidence', 'ingredients', 'steps', 'taste', 'issues'],
+} as const;
