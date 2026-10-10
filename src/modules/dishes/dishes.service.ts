@@ -82,6 +82,8 @@ export class DishesService {
 
         const id: string = body.id || randomUUID();
         const scalars = toDishScalars(body);
+        // Two "Сирники" in one family must not collide on the unique (family, slug).
+        const slug = await this.uniqueSlug(familyId, body.slug || id);
 
         await this.prisma.$transaction(async (tx) => {
             await tx.dish.create({
@@ -89,7 +91,7 @@ export class DishesService {
                     ...(scalars as Prisma.DishCreateInput),
                     id,
                     title: body.title ?? '',
-                    slug: body.slug ?? id,
+                    slug,
                     family: { connect: { id: familyId } },
                     createdByUserId: user!.id,
                 },
@@ -125,6 +127,9 @@ export class DishesService {
         }
 
         const scalars = toDishScalars(body);
+        if (typeof (scalars as { slug?: unknown }).slug === 'string' && (scalars as { slug: string }).slug) {
+            (scalars as { slug: string }).slug = await this.uniqueSlug(existing.familyId, (scalars as { slug: string }).slug, id);
+        }
         await this.prisma.$transaction(async (tx) => {
             // id / familyId / createdByUserId / createdAt are pinned (never in scalars);
             // stamp the editor.
@@ -187,6 +192,22 @@ export class DishesService {
             data: { visibility: 'public', status: 'published' },
         });
         return { count: result.count };
+    }
+
+    /** slug, or slug-2, slug-3... - the first one free in this family (ignoring the dish itself). */
+    private async uniqueSlug(familyId: string, wanted: string, excludeId?: string): Promise<string> {
+        // Kept as given (legacy slugs and shared links must not change), only de-duplicated.
+        const base = String(wanted).trim() || 'recipe';
+        const taken = await this.prisma.dish.findMany({
+            where: { familyId, slug: { startsWith: base }, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
+            select: { slug: true },
+        });
+        const used = new Set(taken.map((dish) => dish.slug));
+        if (!used.has(base)) return base;
+        for (let n = 2; n < 1000; n++) {
+            if (!used.has(`${base}-${n}`)) return `${base}-${n}`;
+        }
+        return `${base}-${randomUUID().slice(0, 8)}`;
     }
 
     // delete + re-insert children, but only for the child types the payload provides.
