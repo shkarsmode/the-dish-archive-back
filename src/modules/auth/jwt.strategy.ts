@@ -23,15 +23,19 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     async validate(payload: { sub: string; email: string; displayName: string | null }): Promise<RequestUser> {
         // Re-read role + approval each request so admin changes take effect without re-login.
+        // One query (user + filtered membership count) instead of two per request.
         const dbUser = await this.prisma.user.findUnique({
             where: { id: payload.sub },
-            select: { globalRole: true, email: true, displayName: true },
+            select: {
+                globalRole: true,
+                email: true,
+                displayName: true,
+                _count: { select: { memberships: { where: { status: 'approved' } } } },
+            },
         });
         const globalRole = dbUser?.globalRole ?? 'user';
         const email = dbUser?.email ?? payload.email;
-        const approvedMemberships = await this.prisma.familyMember.count({
-            where: { userId: payload.sub, status: 'approved' },
-        });
+        const approvedMemberships = dbUser?._count.memberships ?? 0;
         const approved = isSuperAdmin({ email, globalRole }) || approvedMemberships > 0;
         return {
             id: payload.sub,
