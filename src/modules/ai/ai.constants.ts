@@ -29,6 +29,8 @@ export const AI_MAX_CATEGORIES = 8;
 // Numeric ceilings (kept sane for a recipe).
 export const AI_MAX_MINUTES = 6000; // 100h
 export const AI_MAX_CALORIES = 100000;
+/** One ingredient at its amount (2 kg of butter is ~15000 kcal). */
+export const AI_MAX_INGREDIENT_KCAL = 20000;
 export const AI_MAX_SERVINGS = 100;
 export const AI_MAX_STRING = 400;
 export const AI_MAX_DESCRIPTION = 2000;

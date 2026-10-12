@@ -10,6 +10,9 @@ import { buildDraft, normalizeInput, safeParse } from './recipe-draft';
 const SYSTEM_INSTRUCTION = [
     "You convert a free-form spoken or written recipe description into a structured recipe for 'The Dish Archive'.",
     'The description may be in Ukrainian, Russian, English, or a mix. Return ONLY JSON that matches the schema.',
+    'It may also be a whole current recipe followed by "Додатково від автора:", an edit request. Then apply the request',
+    'and keep the rest, including the numbers it states, unless the request changes them (a richer ingredient raises the',
+    'calories, doubled amounts double the servings); a number you recompute counts as estimated.',
     '',
     '- title: a short dish name. description: a short appetising summary (1-2 sentences) in the user language.',
     '- ingredients: list EVERY ingredient the dish needs, in order, WITHOUT omitting the first one. Include the core/base',
@@ -21,7 +24,17 @@ const SYSTEM_INSTRUCTION = [
     '- taste: ALWAYS provide all six values (sweet, salty, sour, bitter, spicy, umami) as integers 0-5, estimated from the',
     '  ingredients and dish type (a dessert is sweet; a savoury dish has umami/salt; a pickled dish is sour; etc.).',
     '  Do not leave a dimension at 0 unless that taste is genuinely absent.',
-    '- servings / prepTime / cookTime / totalTime / calories: fill ONLY if stated or clearly derivable; otherwise null. Do NOT invent precise numbers.',
+    '- NUMBERS, always filled for a real recipe: use what the description states and estimate the rest like an',
+    '  experienced cook. servings = how many typical portions the listed amounts make. prepTime = hands-on minutes',
+    '  (washing, chopping, mixing, shaping); cookTime = minutes on heat, in the oven or setting; totalTime = prepTime +',
+    '  cookTime (+ any stated marinating or chilling). Each ingredient kcal at its amount from typical values per 100 g:',
+    '  flour 360, sugar 400, butter 740, oil 900, potato 80, rice or pasta (dry) 350, chicken breast 110, pork 260, beef 200,',
+    '  sour cream 20% 200, hard cheese 360, cottage cheese 5% 120; an egg 70; milk 60 per 100 ml; 0 for water, salt and',
+    '  spices; frying oil counts only what the food absorbs (about a tablespoon per serving); a counted piece',
+    '  ("2 картоплини") has a typical size. calories = kcal PER SERVING = sum of ingredient kcal / servings, unless the',
+    '  description states a per-serving value.',
+    '- estimated: each of servings, prepTime, cookTime, totalTime, calories that you estimated rather than read. Do not add',
+    '  warnings about estimated numbers; the app marks them for the cook.',
     '- difficulty: easy/medium/hard only if clear, else null. categories: pick any that clearly apply from the allowed list. tags: short helpful free-form tags.',
     '- Inferring an obvious base ingredient or a taste value is expected and good; note only genuinely ambiguous points in warnings, as short strings in the user language.',
     '',
@@ -62,7 +75,8 @@ export class AiRecipeService {
         const model = this.gemini.getModel();
         try {
             const { payload, usage } = await this.callGemini(text);
-            const draft = buildDraft(payload);
+            // Text-only material: the server can double-check which numbers are estimates.
+            const draft = buildDraft(payload, { sourceText: text });
             draft.meta = {
                 model,
                 dailyLimit,

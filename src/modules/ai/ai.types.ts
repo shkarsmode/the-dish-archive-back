@@ -1,6 +1,14 @@
 import { Type } from '@google/genai';
 import { DIFFICULTIES, RECIPE_CATEGORIES } from './ai.constants';
 
+/**
+ * Recipe-level numbers that are always filled: read from the material when it states
+ * them, otherwise estimated by the model. The draft lists which ones are estimates so
+ * the editor can mark them for the cook.
+ */
+export const ESTIMABLE_FIELDS = ['servings', 'prepTime', 'cookTime', 'totalTime', 'calories'] as const;
+export type EstimableField = (typeof ESTIMABLE_FIELDS)[number];
+
 // Thrown inside the AI pipeline with a normalized, non-leaking code. The controller
 // maps it to the right HTTP status; the code is also persisted in AiUsageLog.
 export class AiError extends Error {
@@ -14,13 +22,16 @@ export class AiError extends Error {
     }
 }
 
-// The raw shape we ask Gemini to return. Everything except the arrays is nullable
-// so the model is never forced to invent a value it wasn't given.
+// The raw shape we ask Gemini to return. Ingredient amounts, steps and the like stay
+// optional so the model never invents a fact the material lacks; the recipe-level
+// numbers (servings, times, calories) are the exception and are always estimated.
 export interface GeminiIngredient {
     name?: string | null;
     amount?: string | null;
     unit?: string | null;
     optional?: boolean | null;
+    /** Estimated kcal of this ingredient at its amount; summed by the server. */
+    kcal?: number | null;
 }
 
 export interface GeminiStep {
@@ -44,6 +55,8 @@ export interface GeminiRecipePayload {
     taste?: GeminiTaste | null;
     notes?: string | null;
     warnings?: string[] | null;
+    /** Which of ESTIMABLE_FIELDS the model estimated rather than read. */
+    estimated?: string[] | null;
 }
 
 export interface GeminiTaste {
@@ -71,7 +84,13 @@ export interface RecipeDraft {
     description: string;
     servings: number;
     cookingTime: { preparation: number; cooking: number; total: number };
+    /** kcal per serving. */
     calories: number;
+    /** kcal of the whole recipe (sum of its ingredients), 0 when unknown. Lets the
+     *  editor keep an estimated per-serving value in step with the servings. */
+    caloriesTotal: number;
+    /** Recipe-level numbers that are AI estimates rather than read from the material. */
+    estimated: EstimableField[];
     difficulty: string;
     categories: string[];
     tags: string[];
@@ -95,11 +114,26 @@ export const AI_RECIPE_SCHEMA = {
     properties: {
         title: { type: Type.STRING, nullable: true, description: 'Short dish name if stated/derivable, else null' },
         description: { type: Type.STRING, nullable: true, description: 'One or two sentence appetising description' },
-        servings: { type: Type.INTEGER, nullable: true, description: 'Number of servings/portions if stated, else null' },
-        prepTime: { type: Type.INTEGER, nullable: true, description: 'Preparation minutes if stated, else null' },
-        cookTime: { type: Type.INTEGER, nullable: true, description: 'Cooking minutes if stated, else null' },
-        totalTime: { type: Type.INTEGER, nullable: true, description: 'Total minutes if stated or = prep+cook, else null' },
-        calories: { type: Type.INTEGER, nullable: true, description: 'Approx kcal per serving if derivable, else null' },
+        servings: {
+            type: Type.INTEGER,
+            description: 'Servings: as stated, otherwise estimate how many typical portions the listed amounts make',
+        },
+        prepTime: {
+            type: Type.INTEGER,
+            description: 'Hands-on minutes (washing, chopping, mixing, shaping): as stated, otherwise estimate from the steps',
+        },
+        cookTime: {
+            type: Type.INTEGER,
+            description: 'Minutes on heat, in the oven or setting: as stated, otherwise estimate from the steps',
+        },
+        totalTime: {
+            type: Type.INTEGER,
+            description: 'Total minutes: as stated, otherwise prepTime + cookTime (+ any stated marinating or chilling)',
+        },
+        calories: {
+            type: Type.INTEGER,
+            description: 'kcal PER SERVING: as stated, otherwise the sum of the ingredient kcal divided by servings',
+        },
         difficulty: { type: Type.STRING, nullable: true, enum: [...DIFFICULTIES], description: 'easy | medium | hard' },
         categories: {
             type: Type.ARRAY,
@@ -116,8 +150,14 @@ export const AI_RECIPE_SCHEMA = {
                     amount: { type: Type.STRING, nullable: true, description: 'Quantity as text (e.g. "2", "2-3", "за смаком"), else null' },
                     unit: { type: Type.STRING, nullable: true, description: 'Unit (г, мл, шт, ст.л. …), else null' },
                     optional: { type: Type.BOOLEAN, nullable: true },
+                    kcal: {
+                        type: Type.INTEGER,
+                        description:
+                            'Estimated kcal of this ingredient at its amount, from typical values per 100 g ' +
+                            '(0 for water, salt and spices; frying oil: only what the food absorbs)',
+                    },
                 },
-                required: ['name'],
+                required: ['name', 'kcal'],
             },
         },
         steps: {
@@ -148,8 +188,13 @@ export const AI_RECIPE_SCHEMA = {
         },
         notes: { type: Type.STRING, nullable: true, description: 'Extra tips / notes if any' },
         warnings: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Short notes about anything ambiguous' },
+        estimated: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING, enum: [...ESTIMABLE_FIELDS] },
+            description: 'Each of servings, prepTime, cookTime, totalTime, calories that you ESTIMATED because the material does not state it',
+        },
     },
-    required: ['ingredients', 'steps', 'taste'],
+    required: ['servings', 'prepTime', 'cookTime', 'totalTime', 'calories', 'ingredients', 'steps', 'taste', 'estimated'],
 } as const;
 
 // ── Recipe import (link / photo / text) ──────────────────────────────────────
@@ -168,7 +213,9 @@ export const IMPORT_ISSUE_FIELDS = [
 ] as const;
 export const IMPORT_ISSUE_SEVERITY = ['missing', 'unclear', 'assumed', 'conflict'] as const;
 
-export type ImportIssueField = (typeof IMPORT_ISSUE_FIELDS)[number];
+/** The model files issues under IMPORT_ISSUE_FIELDS; the server adds one 'estimates'
+ *  note summing up the numbers it had to estimate. */
+export type ImportIssueField = (typeof IMPORT_ISSUE_FIELDS)[number] | 'estimates';
 export type ImportIssueSeverity = (typeof IMPORT_ISSUE_SEVERITY)[number];
 
 /** Something the cook should check: a gap, an ambiguity, a guess or a contradiction. */
@@ -287,6 +334,20 @@ export const AI_IMPORT_SCHEMA = {
             items: { type: Type.INTEGER },
             description: '0-based indexes of the attached photos that show the finished dish (good as the recipe cover)',
         },
+        estimated: RECIPE_FIELDS.estimated,
     },
-    required: ['isRecipe', 'confidence', 'ingredients', 'steps', 'taste', 'issues'],
+    required: [
+        'isRecipe',
+        'confidence',
+        'servings',
+        'prepTime',
+        'cookTime',
+        'totalTime',
+        'calories',
+        'ingredients',
+        'steps',
+        'taste',
+        'issues',
+        'estimated',
+    ],
 } as const;

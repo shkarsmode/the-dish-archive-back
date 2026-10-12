@@ -22,6 +22,7 @@ import { AiUsageService } from './ai-usage.service';
 import {
     AI_IMPORT_SCHEMA,
     AiError,
+    EstimableField,
     GeminiImportPayload,
     IMPORT_CONFIDENCE,
     IMPORT_ISSUE_FIELDS,
@@ -46,7 +47,9 @@ const SYSTEM_INSTRUCTION = [
     'language. Keep dish names recognisable ("Тірамісу", "Пад тай", "Сирники").',
     '',
     'GROUNDING:',
-    '- Take facts ONLY from the material. Never invent amounts, times, temperatures, ingredients or steps it does not support.',
+    '- Take facts ONLY from the material. Never invent ingredient amounts, step times, oven temperatures, ingredients or',
+    '  steps it does not support. The recipe-level NUMBERS (servings, prep/cook/total time, calories) are the exception:',
+    '  estimate them when the material is silent (see NUMBERS).',
     '- You may fill what follows directly from the material (total = prep + cook; "на 4 порції" -> servings 4; an ingredient',
     '  the steps clearly use but the list forgot) and then add an issue with severity "assumed" saying what you assumed.',
     '- Not a recipe (news, an ad, a review, a caption with no recipe): isRecipe=false, explain in notRecipeReason, return',
@@ -73,22 +76,33 @@ const SYSTEM_INSTRUCTION = [
     'grated cheese ~ 100 г, rice ~ 190 г); oz -> г, lb -> г, °F -> °C; never write "склянка" for a US cup. Add one',
     '"assumed" issue listing the approximate conversions. Ingredient',
     'groups (dough, filling, sauce): keep the first group plain and append the group in brackets to the items of the',
-    'other groups only, e.g. "вершки 33% (для крему)". Garnish and serving extras are optional.',
+    'other groups only, e.g. "вершки 33% (для крему)". Garnish and serving extras are optional. kcal = the estimated',
+    'energy of the ingredient at its amount (see NUMBERS).',
     '',
     'STEPS: one clear action per step, imperative, in order, starting from the first preparation step. Keep temperatures,',
     'times and doneness cues from the material ("до золотистої скоринки"). duration = minutes of that step if stated.',
     '',
-    'NUMBERS: servings, prepTime, cookTime, totalTime (minutes), calories (per serving) only if stated or directly',
-    'derivable, else null. difficulty from the effort. categories only from the allowed list. tags: 2-6 short Ukrainian',
-    'tags. taste: always estimate all six values 0-5.',
+    'NUMBERS, always filled for a recipe: servings, prepTime, cookTime, totalTime (minutes) and calories (per serving).',
+    'Use the material when it states them (schema.org yield/times/nutrition, "на 4 порції", "30 хв"); otherwise ESTIMATE',
+    'them like an experienced cook: servings = typical portions the amounts make; prepTime = hands-on work (washing,',
+    'chopping, mixing, shaping); cookTime = on heat, in the oven or setting; totalTime = prepTime + cookTime (+ stated',
+    'marinating or chilling). Each ingredient kcal at its amount from typical values per 100 g: flour 360, sugar 400,',
+    'butter 740, oil 900, potato 80, rice or pasta (dry) 350, chicken breast 110, pork 260, beef 200, sour cream 20% 200,',
+    'hard cheese 360, cottage cheese 5% 120; an egg 70; milk 60 per 100 ml; 0 for water, salt and spices; frying oil only',
+    'what the food absorbs; a counted piece ("5 картоплин") has a typical size. calories = sum of ingredient kcal /',
+    'servings unless the material states a per-serving value. estimated = every one of servings, prepTime, cookTime,',
+    'totalTime, calories that you estimated. difficulty from the effort. categories only from the allowed list. tags: 2-6',
+    'short Ukrainian tags. taste: always estimate all six values 0-5.',
     '',
     'ISSUES - review the recipe like a careful cook before it goes into the family archive:',
-    '- missing: an important ingredient without an amount; no baking/frying/simmering time; no oven temperature for a',
-    '  baked dish; no servings or yield; no pan or mould size for a cake; a step the dish clearly needs is absent.',
+    '- missing: an important ingredient without an amount; a baking, frying or simmering step with no time or doneness',
+    '  cue; no oven temperature for a baked dish; no pan or mould size for a cake; a step the dish clearly needs is absent.',
     '- unclear: ambiguous units ("склянка" without volume, "пачка", "жменя"), vague steps with no time or cue',
     '  ("готувати до готовності"), a step that uses an ingredient that is not in the list.',
     '- conflict: numbers that contradict each other (caption vs list, times that do not add up).',
     '- assumed: anything you inferred, converted or scaled.',
+    '- Never file an issue about the recipe-level servings, prep/cook/total time or calories: you estimate those and the',
+    '  app shows the cook which ones are estimates.',
     'Point each issue to its field and, when it is about one ingredient or step, to its 0-based itemIndex in YOUR arrays.',
     'Messages are short, specific and in Ukrainian, e.g. "Не вказано кількість борошна", "Невідомо, скільки часу',
     'випікати", "«Склянка» - уточніть об\'єм (200 чи 250 мл)". Skip trivia (salt "за смаком" is fine). At most 8 issues,',
@@ -112,6 +126,21 @@ const TO_TASTE = /сіль|соль|перець|перец|спеці|спец�
 const OVEN = /духовк|духовц|випік|выпек|запік|запек|\boven\b|\bbake/i;
 // 180 °C, 180С (Cyrillic С), 350F, 180 градусів.
 const TEMPERATURE = /\d{2,3}\s*(?:°|º|градус|[cсfф](?!\p{L}))|градус/iu;
+// "No servings / no cooking time / no calories" issues about the recipe-level numbers,
+// which are always filled now (estimated when the material is silent). Step-level gaps
+// ("скільки часу випікати") deliberately do not match.
+const OVERALL_TIME_TOPIC = /час\p{L}*\s+приготуван|загальн\p{L}*\s+час|тривал\p{L}*\s+приготуван/iu;
+const SERVINGS_TOPIC = /порці|порци/iu;
+const CALORIES_TOPIC = /калорі|калорий|ккал|енергетичн/iu;
+
+/** Ukrainian plural: 1 порція, 2 порції, 5 порцій. */
+function plural(n: number, one: string, few: string, many: string): string {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return one;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+    return many;
+}
 
 /** GEMINI_IMPORT_THINKING=minimal roughly halves the output tokens (thinking is ~60% of them). */
 function importThinkingLevel(): ThinkingLevel {
@@ -244,7 +273,7 @@ export class RecipeImportService {
 
             const parts = this.buildParts({ source, photos, note, useVideo, postImage, reel });
             const { payload, usage } = await this.callGemini(parts, model, useVideo);
-            const result = this.buildResult(payload, { source, photos, useVideo, postImage: !!postImage });
+            const result = this.buildResult(payload, { source, photos, useVideo, postImage: !!postImage, note });
 
             if (result.isRecipe) {
                 const [cover, photoImages] = await Promise.all([
@@ -497,10 +526,17 @@ export class RecipeImportService {
 
     private buildResult(
         payload: GeminiImportPayload,
-        context: { source: ExtractedSource | null; photos: PhotoInput[]; useVideo: boolean; postImage: boolean },
+        context: { source: ExtractedSource | null; photos: PhotoInput[]; useVideo: boolean; postImage: boolean; note: string },
     ): RecipeImportResult {
-        const draft = buildDraft(payload);
-        const { source, photos, useVideo } = context;
+        const { source, photos, useVideo, note } = context;
+        // Text-only material (no photo or video the server cannot read): the server can
+        // double-check which numbers the text never states, i.e. are estimates. The video
+        // length header would read as a stated time, so it is left out.
+        const textOnly = !photos.length && !useVideo && !context.postImage;
+        const material = source
+            ? this.sourceDocument(source).split('\n').filter((line) => !line.startsWith('Video length:')).join('\n')
+            : '';
+        const draft = buildDraft(payload, textOnly ? { sourceText: `${note}\n${material}` } : {});
         const isRecipe = payload.isRecipe !== false && (draft.ingredients.length > 0 || draft.steps.length > 0);
         const sourceKind = IMPORT_SOURCE_KINDS.includes(payload.sourceKind as never)
             ? (payload.sourceKind as RecipeImportResult['sourceKind'])
@@ -562,6 +598,8 @@ export class RecipeImportService {
             const severity = IMPORT_ISSUE_SEVERITY.includes(raw?.severity as never)
                 ? (raw!.severity as ImportIssue['severity'])
                 : 'unclear';
+            // Told not to, the model may still flag a recipe-level number the draft fills.
+            if (this.aboutFilledNumber({ field, severity, message }, result)) continue;
             const limit = field === 'ingredients' ? result.ingredients.length : field === 'steps' ? result.steps.length : 0;
             const index = Number(raw?.itemIndex);
             const issue: ImportIssue = { field, severity, message };
@@ -616,7 +654,54 @@ export class RecipeImportService {
         if (OVEN.test(stepText) && !TEMPERATURE.test(`${stepText}\n${result.notes}`) && !flagged('temperature', /температур/i)) {
             issues.push({ field: 'temperature', severity: 'missing', message: 'Не вказано температуру духовки.' });
         }
-        return issues.slice(0, 10);
+        // The estimates note always makes the list: it is what explains the filled numbers.
+        const estimates = this.estimatesNote(result);
+        return estimates ? [...issues.slice(0, 9), estimates] : issues.slice(0, 10);
+    }
+
+    /**
+     * A model issue about a recipe-level number the draft fills: a "missing" one is no
+     * longer true, and an "assumed" one repeats the estimates note (unless the number is
+     * not an estimate, e.g. servings the user asked to scale to).
+     */
+    private aboutFilledNumber(
+        issue: Pick<ImportIssue, 'field' | 'severity' | 'message'>,
+        result: RecipeImportResult,
+    ): boolean {
+        const { field, severity, message } = issue;
+        if (severity !== 'missing' && severity !== 'assumed') return false;
+        const estimated = new Set<EstimableField>(result.estimated);
+        const covers = (keys: EstimableField[], value: number) =>
+            value > 0 && (severity === 'missing' || keys.some((key) => estimated.has(key)));
+        const general = field === 'other';
+        if ((field === 'servings' || (general && SERVINGS_TOPIC.test(message))) && covers(['servings'], result.servings)) {
+            return true;
+        }
+        if (general && CALORIES_TOPIC.test(message) && covers(['calories'], result.calories)) return true;
+        return (
+            (field === 'time' || general) &&
+            OVERALL_TIME_TOPIC.test(message) &&
+            covers(['prepTime', 'cookTime', 'totalTime'], result.cookingTime.total)
+        );
+    }
+
+    /** One note naming every number the AI estimated; it points at the "Час і порції" card. */
+    private estimatesNote(result: RecipeImportResult): ImportIssue | null {
+        const estimated = new Set<EstimableField>(result.estimated);
+        const time = result.cookingTime;
+        const parts: string[] = [];
+        if (estimated.has('servings')) {
+            parts.push(`${result.servings} ${plural(result.servings, 'порція', 'порції', 'порцій')}`);
+        }
+        if (estimated.has('totalTime')) {
+            parts.push(`~${time.total} хв`);
+        } else {
+            if (estimated.has('prepTime')) parts.push(`підготовка ~${time.preparation} хв`);
+            if (estimated.has('cookTime')) parts.push(`готування ~${time.cooking} хв`);
+        }
+        if (estimated.has('calories')) parts.push(`~${result.calories} ккал на порцію`);
+        if (!parts.length) return null;
+        return { field: 'estimates', severity: 'assumed', message: `AI оцінив: ${parts.join(' · ')}. Перевірте ці числа.` };
     }
 
     // ── Images ───────────────────────────────────────────────────────────────
