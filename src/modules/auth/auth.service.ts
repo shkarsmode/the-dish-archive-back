@@ -1,11 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { FamilyMember, Family, User } from '@prisma/client';
-import { Response } from 'express';
+import { CookieOptions, Response } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
 import { initialGlobalRole } from '../../shared/admin';
-
-const SESSION_COOKIE = 'dish_session';
+import { RequestUser } from '../../shared/current-user.decorator';
+import { SESSION_COOKIE, SESSION_RENEW_AFTER_SECONDS, SESSION_TTL_SECONDS } from './session.constants';
 
 type GoogleUser = {
     googleId: string;
@@ -80,19 +80,27 @@ export class AuthService {
         return this.jwtService.sign({ sub: user.id, email: user.email, displayName: user.displayName });
     }
 
-    attachSessionCookie(response: Response, user: Pick<User, 'id' | 'email' | 'displayName'>): void {
-        const token = this.createSessionToken(user);
-        const isProduction = process.env.NODE_ENV === 'production';
-        response.cookie(SESSION_COOKIE, token, {
-            httpOnly: true,
-            sameSite: isProduction ? 'none' : 'lax',
-            secure: isProduction,
-            maxAge: 14 * 24 * 60 * 60 * 1000,
-        });
+    /** A token older than a day (or one from before the long sessions) gets replaced. */
+    needsRenewal(user: RequestUser): boolean {
+        if (!user.tokenExpiresAt) return true;
+        const remaining = user.tokenExpiresAt - Math.floor(Date.now() / 1000);
+        return remaining < SESSION_TTL_SECONDS - SESSION_RENEW_AFTER_SECONDS;
+    }
+
+    attachSessionCookie(response: Response, token: string): void {
+        response.cookie(SESSION_COOKIE, token, { ...this.cookieOptions(), maxAge: SESSION_TTL_SECONDS * 1000 });
     }
 
     clearSessionCookie(response: Response): void {
-        response.clearCookie(SESSION_COOKIE);
+        // Same attributes as when it was set: a cross-site response may only replace a
+        // SameSite=None cookie with another SameSite=None one, otherwise the browser
+        // ignores the clear and the next visit signs the person straight back in.
+        response.clearCookie(SESSION_COOKIE, this.cookieOptions());
+    }
+
+    private cookieOptions(): CookieOptions {
+        const isProduction = process.env.NODE_ENV === 'production';
+        return { httpOnly: true, sameSite: isProduction ? 'none' : 'lax', secure: isProduction, path: '/' };
     }
 
     async touchLastLogin(userId: string): Promise<void> {

@@ -8,6 +8,8 @@ export type RequestUser = {
     globalRole: string;
     // Derived: super-admin OR has ≥1 approved family membership.
     approved: boolean;
+    // `exp` of the session token (seconds), so GET /auth/session can renew it in time.
+    tokenExpiresAt?: number;
 };
 
 export const CurrentUser = createParamDecorator(

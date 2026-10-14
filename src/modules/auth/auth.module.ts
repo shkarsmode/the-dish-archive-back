@@ -5,13 +5,14 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { GoogleStrategy } from './google.strategy';
 import { JwtStrategy } from './jwt.strategy';
+import { SESSION_TTL_SECONDS } from './session.constants';
 
 @Module({
     imports: [
         PassportModule,
         JwtModule.register({
             secret: process.env.JWT_SECRET || 'development-only-secret',
-            signOptions: { expiresIn: '14d' },
+            signOptions: { expiresIn: SESSION_TTL_SECONDS },
         }),
     ],
     controllers: [AuthController],
