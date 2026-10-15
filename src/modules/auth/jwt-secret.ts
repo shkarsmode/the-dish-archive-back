@@ -4,7 +4,7 @@
 export function jwtSecret(): string {
     const secret = process.env.JWT_SECRET;
     if (secret) return secret;
-    if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
+    if (process.env.NODE_ENV === 'production') {
         throw new Error('JWT_SECRET is not set — refusing to start with a publicly known signing key');
     }
     return 'development-only-secret';
