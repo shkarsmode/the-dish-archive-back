@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { isSuperAdmin } from '../../shared/admin';
 import { RequestUser } from '../../shared/current-user.decorator';
+import { jwtSecret } from './jwt-secret';
 import { SESSION_COOKIE } from './session.constants';
 
 @Injectable()
@@ -17,7 +18,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
                 ExtractJwt.fromAuthHeaderAsBearerToken(),
                 (request) => request?.cookies?.[SESSION_COOKIE] || null,
             ]),
-            secretOrKey: process.env.JWT_SECRET || 'development-only-secret',
+            secretOrKey: jwtSecret(),
         });
     }
 

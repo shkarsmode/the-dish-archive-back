@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
 import { FamilyMember, FamilyRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ActivityService } from '../../shared/activity.service';
@@ -71,6 +71,20 @@ export class AccessRequestsService {
 
         const familyId = dto.familyId ?? null;
         const role: FamilyRole = dto.role ?? 'viewer';
+
+        // Anyone with a Google account can reach this, so it must not grow the table without
+        // bound: one pending request per family (asking again returns it), five a day.
+        const pending = await this.prisma.accessRequest.findFirst({
+            where: { requestedByUserId: user.id, familyId, status: 'pending' },
+            include: ACCESS_REQUEST_INCLUDE,
+        });
+        if (pending) return toApiAccessRequest(pending);
+        const recent = await this.prisma.accessRequest.count({
+            where: { requestedByUserId: user.id, createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } },
+        });
+        if (recent >= 5) {
+            throw new HttpException('Забагато запитів на доступ. Спробуйте завтра.', HttpStatus.TOO_MANY_REQUESTS);
+        }
 
         const created = await this.prisma.accessRequest.create({
             data: {

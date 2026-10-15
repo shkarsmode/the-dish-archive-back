@@ -4,6 +4,7 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { GoogleStrategy } from './google.strategy';
+import { jwtSecret } from './jwt-secret';
 import { JwtStrategy } from './jwt.strategy';
 import { SESSION_TTL_SECONDS } from './session.constants';
 
@@ -11,7 +12,7 @@ import { SESSION_TTL_SECONDS } from './session.constants';
     imports: [
         PassportModule,
         JwtModule.register({
-            secret: process.env.JWT_SECRET || 'development-only-secret',
+            secret: jwtSecret(),
             signOptions: { expiresIn: SESSION_TTL_SECONDS },
         }),
     ],
